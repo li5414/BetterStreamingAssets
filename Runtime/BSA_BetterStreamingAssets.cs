@@ -80,16 +80,16 @@ public static partial class BetterStreamingAssets
         return BetterStreamingAssetsImp.DirectoryExists(path);
     }
 
-    public static AssetBundleCreateRequest LoadAssetBundleAsync(string path, uint crc = 0)
+    public static AssetBundleCreateRequest LoadAssetBundleAsync(string path, uint crc = 0,ulong offset = 0)
     {
         var info = GetInfoOrThrow(path);
-        return AssetBundle.LoadFromFileAsync(info.readPath, crc, (ulong)info.offset);
+        return AssetBundle.LoadFromFileAsync(info.readPath, crc, (ulong)info.offset+ offset);
     }
 
-    public static AssetBundle LoadAssetBundle(string path, uint crc = 0)
+    public static AssetBundle LoadAssetBundle(string path, uint crc = 0,ulong offset = 0)
     {
         var info = GetInfoOrThrow(path);
-        return AssetBundle.LoadFromFile(info.readPath, crc, (ulong)info.offset);
+        return AssetBundle.LoadFromFile(info.readPath, crc, (ulong)info.offset+ offset);
     }
 
     public static System.IO.Stream OpenRead(string path)
@@ -349,11 +349,14 @@ public static partial class BetterStreamingAssets
         private static PartInfo[] s_streamingAssets;
         public static string s_root;
 
+        private static string[] s_roots;
         private struct PartInfo
         {
             public long size;
             public long offset;
             public uint crc32;
+            public int apkIndex;
+            public bool @fixed;
         }
 
         public static void Initialize(string dataPath, string streamingAssetsPath)
@@ -362,27 +365,19 @@ public static partial class BetterStreamingAssets
             
             List<string> paths = new List<string>();
             List<PartInfo> parts = new List<PartInfo>();
-
-            
-            if (dataPath.EndsWith("pram-shadow-files"))
+            var directoryName = Path.GetDirectoryName(dataPath);
+            if(!string.IsNullOrEmpty(directoryName))
             {
-                Debug.Assert(streamingAssetsPath.EndsWith("pram-shadow-files/assets"));
-                GetStreamingAssetsFromPatch(dataPath, paths, parts);
+                var filenames = Directory.GetFiles(directoryName, "*.apk");
+                s_roots = filenames.ToArray();
+                for (int i = 0; i < s_roots.Length; i++)
+                {
+                    GetStreamingAssetsInfoFromJar(s_roots[i], paths, parts, i);
+                }
             }
             else
             {
                 GetStreamingAssetsInfoFromJar(s_root, paths, parts);
-
-                if (paths.Count == 0 && !Application.isEditor && Path.GetFileName(dataPath) != "base.apk")
-                {
-                    // maybe split?
-                    var newDataPath = Path.GetDirectoryName(dataPath) + "/base.apk";
-                    if (File.Exists(newDataPath))
-                    {
-                        s_root = newDataPath;
-                        GetStreamingAssetsInfoFromJar(newDataPath, paths, parts);
-                    }
-                }
             }
             
             s_paths = paths.ToArray();
@@ -399,20 +394,11 @@ public static partial class BetterStreamingAssets
                 return false;
 
             var dataInfo = s_streamingAssets[index];
+            info.crc32 = dataInfo.crc32;
+            info.offset = dataInfo.offset;
             info.size = dataInfo.size;
-
-            if (dataInfo.offset < 0)
-            {
-                // this must be a patch release
-                info.readPath = s_root + "/assets" + path;
-            }
-            else
-            {
-                info.crc32 = dataInfo.crc32;
-                info.offset = dataInfo.offset;
-                info.readPath = s_root;
-            }
-
+            // info.readPath = s_root;
+            info.readPath = dataInfo.apkIndex==-1?s_root: s_roots[dataInfo.apkIndex];
             return true;
         }
 
@@ -600,7 +586,7 @@ public static partial class BetterStreamingAssets
             }
         }
         
-        private static void GetStreamingAssetsInfoFromJar(string apkPath, List<string> paths, List<PartInfo> parts)
+        private static void GetStreamingAssetsInfoFromJar(string apkPath, List<string> paths, List<PartInfo> parts,int apkIndex = -1)
         {
             using ( var stream = File.OpenRead(apkPath) )
             using ( var reader = new BinaryReader(stream) )
@@ -682,7 +668,9 @@ public static partial class BetterStreamingAssets
                                     {
                                         crc32 = header.Crc32,
                                         offset = header.RelativeOffsetOfLocalHeader, // this offset will need fixing later on
-                                        size = header.UncompressedSize
+                                        size = header.UncompressedSize,
+                                        apkIndex = apkIndex,
+                                        @fixed = false
                                     };
 
                                     var index = paths.BinarySearch(relativePath, StringComparer.OrdinalIgnoreCase);
@@ -711,13 +699,13 @@ public static partial class BetterStreamingAssets
                 for ( int i = 0; i < parts.Count; ++i )
                 {
                     var entry = parts[i];
+                    if(entry.@fixed)continue;
                     stream.Seek(entry.offset, SeekOrigin.Begin);
-
                     if ( !ZipLocalFileHeader.TrySkipBlock(reader) )
                         throw new ZipArchiveException("Local file header corrupt");
 
                     entry.offset = stream.Position;
-
+                    entry.@fixed = true;
                     parts[i] = entry;
                 }
             }
